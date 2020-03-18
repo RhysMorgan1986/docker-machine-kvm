@@ -26,7 +26,6 @@ import (
 )
 
 const (
-	connectionString   = "qemu:///system"
 	privateNetworkName = "docker-machines"
 	isoFilename        = "boot2docker.iso"
 	dnsmasqLeases      = "/var/lib/libvirt/dnsmasq/%s.leases"
@@ -121,6 +120,11 @@ func (d *Driver) GetCreateFlags() []mcnflag.Flag {
 			Value: "default",
 		},
 		mcnflag.StringFlag{
+			Name:  "kvm-connect-string",
+			Usage: "KVM Connection String",
+			Value: "qemu:///system",
+		},
+		mcnflag.StringFlag{
 			EnvVar: "KVM_BOOT2DOCKER_URL",
 			Name:   "kvm-boot2docker-url",
 			Usage:  "The URL of the boot2docker image. Defaults to the latest available version",
@@ -192,7 +196,7 @@ func (d *Driver) SetConfigFromFlags(flags drivers.DriverOptions) error {
 	d.Boot2DockerURL = flags.String("kvm-boot2docker-url")
 	d.CacheMode = flags.String("kvm-cache-mode")
 	d.IOMode = flags.String("kvm-io-mode")
-
+	d.connectionString = flags.String("kvm-connect-string")
 	d.SwarmMaster = flags.Bool("swarm-master")
 	d.SwarmHost = flags.String("swarm-host")
 	d.SwarmDiscovery = flags.String("swarm-discovery")
