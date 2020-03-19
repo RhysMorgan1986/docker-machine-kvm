@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,17 +21,17 @@ import (
 	"github.com/docker/machine/libmachine/drivers"
 	"github.com/docker/machine/libmachine/log"
 	"github.com/docker/machine/libmachine/mcnflag"
-	"github.com/docker/machine/libmachine/mcnutils"
 	"github.com/docker/machine/libmachine/ssh"
 	"github.com/docker/machine/libmachine/state"
 )
 
 const (
+	//connectionString   = "qemu+ssh://ubuntu@192.168.0.62/system"
 	privateNetworkName = "docker-machines"
-	isoFilename        = "boot2docker.iso"
-	dnsmasqLeases      = "/var/lib/libvirt/dnsmasq/%s.leases"
-	dnsmasqStatus      = "/var/lib/libvirt/dnsmasq/%s.status"
-	defaultSSHUser     = "docker"
+	//isoFilename        = "boot2docker.iso"
+	dnsmasqLeases  = "/var/lib/libvirt/dnsmasq/%s.leases"
+	dnsmasqStatus  = "/var/lib/libvirt/dnsmasq/%s.status"
+	defaultSSHUser = "docker"
 
 	domainXMLTemplate = `<domain type='kvm'>
   <name>{{.MachineName}}</name> <memory unit='M'>{{.Memory}}</memory>
@@ -51,7 +52,7 @@ const (
     </disk>
     <disk type='file' device='disk'>
       <driver name='qemu' type='raw' cache='{{.CacheMode}}' io='{{.IOMode}}' />
-      <source file='{{.DiskPath}}'/>
+      <source file='{{.HypervisorRoot}}'/>
       <target dev='hda' bus='ide'/>
     </disk>
     <graphics type='vnc' autoport='yes' listen='127.0.0.1'>
@@ -88,8 +89,10 @@ type Driver struct {
 	CaCertPath       string
 	PrivateKeyPath   string
 	DiskPath         string
+	HypervisorRoot   string
 	CacheMode        string
 	IOMode           string
+	KVMHost          string
 	connectionString string
 	conn             *libvirt.Connect
 	VM               *libvirt.Domain
@@ -122,13 +125,13 @@ func (d *Driver) GetCreateFlags() []mcnflag.Flag {
 		mcnflag.StringFlag{
 			Name:  "kvm-connect-string",
 			Usage: "KVM Connection String",
-			Value: "qemu:///system",
+			Value: "qemu+tcp://192.168.0.62:5000/system",
 		},
 		mcnflag.StringFlag{
 			EnvVar: "KVM_BOOT2DOCKER_URL",
 			Name:   "kvm-boot2docker-url",
 			Usage:  "The URL of the boot2docker image. Defaults to the latest available version",
-			Value:  "",
+			Value:  "/home/ubuntu/boot2docker.iso",
 		},
 		mcnflag.StringFlag{
 			Name:  "kvm-cache-mode",
@@ -145,6 +148,16 @@ func (d *Driver) GetCreateFlags() []mcnflag.Flag {
 			Name:   "kvm-ssh-user",
 			Usage:  "SSH username",
 			Value:  defaultSSHUser,
+		},
+		mcnflag.StringFlag{
+			Name:  "kvm-disk-root",
+			Usage: "Base Hypervisor Path",
+			Value: "/home/ubuntu/vm-disks/",
+		},
+		mcnflag.StringFlag{
+			Name:  "kvm-host",
+			Usage: "KVM Host URL",
+			Value: "http://192.168.0.62",
 		},
 		/* Not yet implemented
 		mcnflag.Flag{
@@ -200,10 +213,13 @@ func (d *Driver) SetConfigFromFlags(flags drivers.DriverOptions) error {
 	d.SwarmMaster = flags.Bool("swarm-master")
 	d.SwarmHost = flags.String("swarm-host")
 	d.SwarmDiscovery = flags.String("swarm-discovery")
-	d.ISO = d.ResolveStorePath(isoFilename)
+	//d.ISO = d.ResolveStorePath(isoFilename)
+	d.KVMHost = flags.String("kvm-host")
+	d.ISO = flags.String("kvm-boot2docker-url")
 	d.SSHUser = flags.String("kvm-ssh-user")
+	d.HypervisorRoot = fmt.Sprintf("%s%s.img", flags.String("kvm-disk-root"), d.MachineName)
 	d.SSHPort = 22
-	d.DiskPath = d.ResolveStorePath(fmt.Sprintf("%s.img", d.MachineName))
+	d.DiskPath = fmt.Sprintf("%s.img", d.MachineName)
 	return nil
 }
 
@@ -222,7 +238,7 @@ func (d *Driver) GetURL() (string, error) {
 
 func (d *Driver) getConn() (*libvirt.Connect, error) {
 	if d.conn == nil {
-		conn, err := libvirt.NewConnect(connectionString)
+		conn, err := libvirt.NewConnect(d.connectionString)
 		if err != nil {
 			log.Errorf("Failed to connect to libvirt: %s", err)
 			return &libvirt.Connect{}, errors.New("Unable to connect to kvm driver, did you add yourself to the libvirtd group?")
@@ -349,10 +365,10 @@ func (d *Driver) PreCreateCheck() error {
 }
 
 func (d *Driver) Create() error {
-	b2dutils := mcnutils.NewB2dUtils(d.StorePath)
-	if err := b2dutils.CopyIsoToMachineDir(d.Boot2DockerURL, d.MachineName); err != nil {
-		return err
-	}
+	// b2dutils := mcnutils.NewB2dUtils(d.StorePath)
+	// if err := b2dutils.CopyIsoToMachineDir(d.Boot2DockerURL, d.MachineName); err != nil {
+	// 	return err
+	// }
 
 	log.Infof("Creating SSH key...")
 	if err := ssh.GenerateSSHKey(d.GetSSHKeyPath()); err != nil {
@@ -665,19 +681,11 @@ func (d *Driver) getIPByMacFromSettings(mac string) (string, error) {
 
 func (d *Driver) GetIP() (string, error) {
 	log.Debugf("GetIP called for %s", d.MachineName)
-	mac, err := d.getMAC()
+	
+	ip,err := GetRemoteIPAddress(d.KVMHost,d.MachineName)
 	if err != nil {
-		return "", err
+		log.Debugf("Unable to locate IP address for MAC %s", mac)
 	}
-	/*
-	 * TODO - Figure out what version of libvirt changed behavior and
-	 *        be smarter about selecting which algorithm to use
-	 */
-	ip, err := d.getIPByMACFromLeaseFile(mac)
-	if ip == "" {
-		ip, err = d.getIPByMacFromSettings(mac)
-	}
-	log.Debugf("Unable to locate IP address for MAC %s", mac)
 	return ip, err
 }
 
@@ -729,7 +737,8 @@ func (d *Driver) generateDiskImage(size int) error {
 		return err
 	}
 	raw := bytes.NewReader(buf.Bytes())
-	return createDiskImage(d.DiskPath, size, raw)
+	return RemoteCreateDiskImage(d.KVMHost, d.DiskPath, size, raw)
+	//return createDiskImage(d.DiskPath, size, raw)
 }
 
 // createDiskImage makes a disk image at dest with the given size in MB. If r is
@@ -761,4 +770,53 @@ func NewDriver(hostName, storePath string) drivers.Driver {
 			StorePath:   storePath,
 		},
 	}
+}
+
+func RemoteCreateDiskImage(kvmHost string, dest string, size int, r io.Reader) error {
+
+	url := fmt.Sprintf("%s/api/createimage/%s/%d", kvmHost, dest, size)
+	log.Debugf("Calling API: %s", url)
+	log.Warnf("Calling: %s", url)
+
+	// params := url.Values{}
+	// baseUrl.RawQuery = params.Encode()
+	req, err := http.NewRequest("POST", url, r)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Warnf("Failed to call stu: %s", err)
+		return err
+		panic(err)
+	}
+	defer resp.Body.Close()
+
+	return nil
+
+}
+
+func GetRemoteIPAddress(kvmHost string, machine string) string, error {
+
+	url := fmt.Sprintf("%s/api/getip/%s", kvmHost, machine)
+
+	req, err := http.NewRequest("GET", url)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Warnf("Failed to call stu: %s", err)
+		return nil, err
+		panic(err)
+	}
+	defer resp.Body.Close()
+
+	contents, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+			fmt.Printf("%s", err)
+			log.Warnf("Failed to read body: %s", err)
+
+	}
+	fmt.Printf("%s\n", string(contents))
+	return string(contents)
+
 }
